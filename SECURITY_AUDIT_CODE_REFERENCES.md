@@ -393,12 +393,53 @@ If ${version} evaluates to something unexpected, could leak internal data
 
 ---
 
+## [HIGH] 13. GitHubActions.cs - GitHub ENV Format Injection
+
+**File:** `src/GitVersion.BuildAgents/Agents/GitHubActions.cs`
+
+**Environment Variable Writing (lines 34-40):**
+```34:40:src/GitVersion.BuildAgents/Agents/GitHubActions.cs
+using var streamWriter = this.fileSystem.File.AppendText(gitHubSetEnvFilePath);
+foreach (var (key, value) in variables)
+{
+    if (!value.IsNullOrEmpty())
+    {
+        streamWriter.WriteLine($"GitVersion_{key}={value}");
+    }
+}
+```
+
+**Vulnerability:** GitHub Actions `$GITHUB_ENV` file format requires special handling for multiline values using a delimiter-based syntax (e.g., `<<EOF`). The code writes raw `key=value` format without:
+1. Escaping or validating newlines in values
+2. Using delimiter-based format for multiline values
+3. Checking GitHub's format requirements
+
+**Attack Example:**
+```
+BranchName value: "feature/test\nGITVERSION_INJECTED=malicious_value"
+Generates: GitVersion_BranchName=feature/test
+          GITVERSION_INJECTED=malicious_value
+Result: Injects unintended environment variable into GitHub Actions context
+```
+
+**GitHub Actions Documentation:** According to official docs, multiline values should use the format:
+```
+name<<EOF
+value with
+multiple lines
+EOF
+```
+
+The current code doesn't implement this, causing injection of new variables.
+
+---
+
 ## Variable Flow Analysis
 
 **Where Attacker-Influenced Data Enters:**
 
 1. **Git Repository Metadata:**
-   - Branch names → `BranchName` → flows to all 8 properties-format agents + JSON + shell
+   - Branch names → `BranchName` → flows to all 9 properties-format agents + JSON + shell + GitHub Actions
    - Tags → `PreReleaseLabel` → flows to all outputs
    - Commit messages → `InformationalVersion` → flows to assembly info, generated code, all outputs
    - Commit SHA → `Sha` → flows to all outputs (low risk, hex-only)
@@ -418,6 +459,7 @@ If ${version} evaluates to something unexpected, could leak internal data
 - `WixVersionFileUpdater` → WIX XML
 - All build agents → environment variable output
 - `VersionVariableSerializer` → JSON output
+- `GitHubActions` → GitHub Actions env file
 
 ---
 
@@ -459,5 +501,11 @@ Branch: master&amp;&lt;&gt;
 ```
 Version: 1.0.0<script>alert(1)</script>
 Version: 1.0.0\" onload=\"alert(1)
+```
+
+### GitHub Actions
+```
+Branch: feature/test\nInjected=yes
+Branch: feature/test\n${{ secrets.PAT }}=leaked
 ```
 
