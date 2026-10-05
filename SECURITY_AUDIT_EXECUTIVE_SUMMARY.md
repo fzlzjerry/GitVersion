@@ -4,8 +4,8 @@
 
 **Audit Date:** October 5, 2026  
 **Scope:** GitVersion `src/` directory (legacy CLI and output generators)  
-**Findings:** 12 injection vulnerabilities identified  
-**Severity:** 2 CRITICAL, 5 HIGH, 5 MEDIUM-HIGH
+**Findings:** 13 injection vulnerabilities identified  
+**Severity:** 2 CRITICAL, 6 HIGH, 5 MEDIUM-HIGH
 
 ---
 
@@ -26,7 +26,7 @@
 - **CVSS Estimated:** 9.1 (CWE-94: Improper Control of Generation of Code)
 
 ### 3. PowerShell Code Injection - RCE on Windows Agents
-- **Affected File:** `BitBucketPipelines.cs` (lines 61-63)
+- **Affected File:** `BitBucketPipelines.cs` (lines 61-63) 
 - **Risk:** Double-quoted PowerShell strings allow variable expansion and command substitution
 - **Attack Vector:** Version value like `master$(whoami)` or `master\$(pwsh -c 'net user attacker pass /add')`
 - **Impact:** Remote Code Execution on Windows build agents
@@ -36,28 +36,37 @@
 
 ## High Priority Vulnerabilities (Fix Before Next Release)
 
-### 4. Properties File Injection - Multi-Agent Compromise
+### 4. GitHub Actions Environment Injection
+- **Affected File:** `GitHubActions.cs` (line 39)
+- **Risk:** Multiline values not properly escaped, allows injecting new environment variables
+- **Attack Vector:** Branch name like `master\nInjected=pwned` or `feature/test\n${{ secrets.PAT }}=leaked`
+- **Impact:** Arbitrary environment variable injection into GitHub Actions workflows, potential secret leakage
+- **CVSS Estimated:** 8.3
+
+---
+
+### 5. Properties File Injection - Multi-Agent Compromise
 - **Affected Files:** GitLabCi, Jenkins, Drone, CodeBuild (all lines 22-24)
 - **Risk:** Unescaped newlines allow injecting new properties into build configuration
 - **Attack Vector:** Branch name like `master\nGitVersion_Injected=malicious_value`
 - **Impact:** Build configuration manipulation, credential injection, arbitrary environment variables
 - **CVSS Estimated:** 8.2
 
-### 5. WIX XML Injection - Installer Tampering
+### 6. WIX XML Injection - Installer Tampering
 - **Affected File:** `WixVersionFileUpdater.cs` (lines 45-46)
 - **Risk:** XML generated without escaping key and value elements
 - **Attack Vector:** Branch name with XML special characters `< > " &` and XML injection sequences
 - **Impact:** Malformed WIX configuration, modified installer behavior, supply chain attack vector
 - **CVSS Estimated:** 7.8
 
-### 6. JSON with Unsafe Escaping - XSS in Web Dashboards
+### 7. JSON with Unsafe Escaping - XSS in Web Dashboards
 - **Affected File:** `VersionVariablesJsonContext.cs` (line 16)
 - **Risk:** Uses `JavaScriptEncoder.UnsafeRelaxedJsonEscaping` which doesn't escape HTML entities
 - **Attack Vector:** Version value containing `<`, `>`, `&`, `'` characters that execute in web contexts
 - **Impact:** Cross-Site Scripting (XSS) if JSON displayed in web-based build dashboards
 - **CVSS Estimated:** 6.1
 
-### 7. Regex Replacement Injection - Information Disclosure
+### 8. Regex Replacement Injection - Information Disclosure
 - **Affected File:** `AzurePipelines.cs` (lines 62-70)
 - **Risk:** Unescaped replacement string in regex operations
 - **Attack Vector:** Version value containing `$&`, `$1` (regex backreferences)
@@ -71,13 +80,13 @@
 | Build System | Injection Type | Severity |
 |---|---|---|
 | BitBucketPipelines | Bash + PowerShell export | CRITICAL |
+| GitHub Actions | Environment file newline injection | HIGH |
 | GitLabCi | Properties file newlines | HIGH |
 | Jenkins | Properties file newlines | HIGH |
 | Drone | Properties file newlines | HIGH |
 | CodeBuild | Properties file newlines | HIGH |
 | AzurePipelines | Regex replacement | MEDIUM |
 | TeamCity | (Properly escaped via ServiceMessageEscapeHelper) | SAFE ✓ |
-| GitHub Actions | (Properly handled via GitHub env file protocol) | SAFE ✓ |
 | All Agents | Generated source code files | CRITICAL |
 | All Agents | Assembly attribute generation | CRITICAL |
 | All Agents | WIX XML generation | HIGH |
@@ -113,7 +122,8 @@
 1. Escape shell metacharacters in BitBucketPipelines (CRITICAL)
 2. Escape quotes in PowerShell variables (CRITICAL)
 3. Escape quotes in generated C# code (CRITICAL)
-4. Change `UnsafeRelaxedJsonEscaping` to `Default` encoder (MEDIUM, low-risk fix)
+4. Implement GitHub Actions multiline value escaping with delimiter format (HIGH)
+5. Change `UnsafeRelaxedJsonEscaping` to `Default` encoder (MEDIUM, low-risk fix)
 
 ### Short Term (Next Minor Release)
 1. Implement proper escaping for all properties-format build agents
@@ -139,6 +149,7 @@
 - `src/GitVersion.Output/GitVersionInfo/GitVersionInfoGenerator.cs` — CRITICAL
 - `src/GitVersion.Output/AssemblyInfo/AssemblyInfoFileUpdater.cs` — CRITICAL
 - `src/GitVersion.BuildAgents/Agents/BitBucketPipelines.cs` — CRITICAL (2 vulns)
+- `src/GitVersion.BuildAgents/Agents/GitHubActions.cs` — HIGH
 - `src/GitVersion.BuildAgents/Agents/GitLabCi.cs` — HIGH
 - `src/GitVersion.BuildAgents/Agents/Jenkins.cs` — HIGH
 - `src/GitVersion.BuildAgents/Agents/Drone.cs` — HIGH
@@ -178,17 +189,16 @@ dotnet run --project src/GitVersion.App --output json
 cat GitVersionInformation.cs | grep -i "throw"
 ```
 
-#### Properties File Injection (Jenkins)
+#### GitHub Actions (GitHub Actions)
 ```bash
-# Setup: Create branch
-git checkout -b 'master
-GitVersion_Injected=pwned'
+# Setup: Create branch with injection payload
+git checkout -b "feature/test\nInjected=pwned"
 
 # Run GitVersion
 dotnet run --project src/GitVersion.App
 
-# Check: gitversion.properties contains injected property
-grep "Injected" gitversion.properties
+# Check: $GITHUB_ENV file should contain injected property
+cat $GITHUB_ENV | grep "Injected"
 ```
 
 ---
