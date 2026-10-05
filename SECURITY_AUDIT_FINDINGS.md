@@ -6,12 +6,13 @@
 
 ## Summary
 
-This audit identified **12 injection vulnerability points** where attacker-controlled data from Git repository metadata is written into:
+This audit identified **13 injection vulnerability points** where attacker-controlled data from Git repository metadata is written into:
 - Generated source code files (C#, VB.NET, F#)
 - CI environment property files (Java properties format)
 - PowerShell and Bash scripts
 - WIX XML configuration
 - MSBuild system messages
+- GitHub Actions environment files
 - JSON output files
 
 These vulnerabilities allow an attacker to inject arbitrary code, escape shell contexts, or poison build pipelines by crafting malicious Git branch names, tag names, commit messages, or configuration values.
@@ -299,6 +300,36 @@ All variables that come from Git repository metadata are potentially vulnerable:
 
 ---
 
+### Category 7: GitHub Actions Environment File (High)
+
+#### [13] GitHubActions - GITHUB_ENV Format Injection
+**File:** `src/GitVersion.BuildAgents/Agents/GitHubActions.cs`  
+**Lines:** 39
+
+```39:39:src/GitVersion.BuildAgents/Agents/GitHubActions.cs
+streamWriter.WriteLine($"GitVersion_{key}={value}");
+```
+
+**Vulnerability:** GitHub Actions `$GITHUB_ENV` file format according to official documentation requires special handling for multiline values using a delimiter-based syntax. The code writes raw `key=value` format without:
+1. Escaping newlines in values
+2. Using delimiter-based format for multiline values
+3. Validating that values don't contain unescaped newlines
+
+When a variable contains a newline, this creates a new environment variable entry that was not intended, allowing injection of arbitrary variables.
+
+**Attack Vector:** Variable containing newlines or special GitHub Actions control sequences.
+
+**Example:**
+```
+BranchName value containing newline: "feature/test\nGITVERSION_INJECTED=malicious"
+Generates two env vars: GitVersion_BranchName=feature/test
+                       GITVERSION_INJECTED=malicious
+```
+
+**Note:** GitHub Actions documentation recommends using the `<<EOF` delimiter format for multiline values.
+
+---
+
 ## Excluded Known Issues
 
 The following previously known issues were NOT included in this report (as requested):
@@ -312,7 +343,6 @@ The following previously known issues were NOT included in this report (as reque
 
 - `new-cli/` - No similar injection points found in initial scan
 - MSBuild tasks - Properties are set via MSBuild API, not string concatenation
-- GitHub Actions `$GITHUB_ENV` format - Uses `key=value` but requires validation
 
 ---
 
@@ -323,7 +353,8 @@ The following previously known issues were NOT included in this report (as reque
 | Generated Source Code | **CRITICAL** | Build-time code injection, arbitrary .NET execution |
 | Shell Script Injection | **CRITICAL** | Remote Code Execution on build agents |
 | XML Injection | **HIGH** | Configuration poisoning, installer tampering |
+| GitHub Actions Env File | **HIGH** | Environment variable injection, build configuration manipulation |
 | JSON UnsafeEscaping | **HIGH** | Potential XSS in web dashboards |
 | Properties File Injection | **HIGH** | Build configuration manipulation |
-| EnvRun/TeamCity | **MEDIUM** | Limited escape context, partial breakout possible |
+| EnvRun/GitHub Actions | **MEDIUM** | Limited escape context, partial breakout possible |
 | Regex Replacement | **MEDIUM** | Information disclosure, pattern group manipulation |
